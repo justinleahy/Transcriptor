@@ -1,0 +1,67 @@
+[package]
+name = "transcriptor"
+version = "0.1.0"
+description = "Record meetings and transcribe them, locally or in the cloud."
+authors = ["Justin Leahy"]
+edition = "2021"
+rust-version = "1.85"
+
+[lib]
+name = "transcriptor_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+# Optional GPU backends for local Whisper on Windows/Linux (macOS always uses Metal).
+gpu-vulkan = ["whisper-rs/vulkan"]
+gpu-cuda = ["whisper-rs/cuda"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "io-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream"] }
+futures-util = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
+dirs = "6"
+url = "2"
+sha2 = "0.10"
+
+# Audio
+cpal = "0.18"
+hound = "3.5"
+
+# Local transcription (whisper.cpp)
+whisper-rs = { version = "0.16", features = ["log_backend"] }
+
+# PulseAudio host (pure-Rust protocol client; also works with PipeWire via
+# pipewire-pulse) so Linux can record monitor sources as system audio.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18", features = ["pulseaudio"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16", features = ["log_backend", "metal"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2

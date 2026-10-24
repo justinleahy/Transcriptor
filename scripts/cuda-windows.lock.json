@@ -1,0 +1,27 @@
+{
+  "version": "12.9.1",
+  "source": "https://developer.download.nvidia.com/compute/cuda/redist/redistrib_12.9.1.json",
+  "baseUrl": "https://developer.download.nvidia.com/compute/cuda/redist/",
+  "components": [
+    {
+      "name": "cuda_cccl",
+      "archive": "cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-12.9.27-archive.zip",
+      "sha256": "17aaa7c6b8f94a417d8f3261780b7e34b9cbdfab7513bce86768623b06aa28b5"
+    },
+    {
+      "name": "cuda_cudart",
+      "archive": "cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.9.79-archive.zip",
+      "sha256": "179e9c43b0735ffe67207b3da556eb5a0c50f3047961882b7657d3b822d34ef8"
+    },
+    {
+      "name": "cuda_nvcc",
+      "archive": "cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-12.9.86-archive.zip",
+      "sha256": "227b109663b5e57d2718bcabb24a4ba0d9d4e52d958e327dc476f7c28691be85"
+    },
+    {
+      "name": "libcublas",
+      "archive": "libcublas/windows-x86_64/libcublas-windows-x86_64-12.9.1.4-archive.zip",
+      "sha256": "d534d98b0b453a98914dbf3adf47d7e84b55037abf02f87466439e1dcef581ed"
+    }
+  ]
+}

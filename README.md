@@ -38,7 +38,7 @@ searchable library.
 | Platform | Microphone | System audio ("Others") | Local Whisper GPU | Status |
 |---|---|---|---|---|
 | macOS 14.6+ | ✅ | ✅ Core Audio process tap | ✅ Metal (always on) | Primary development platform |
-| Windows 10/11 | ✅ | ✅ WASAPI loopback | Optional: Vulkan or CUDA (build feature) | Untested until CI runs |
+| Windows 10/11 | ✅ | ✅ WASAPI loopback | Optional: Vulkan; packaged NVIDIA CUDA flavor | Native build/GPU validation pending |
 | Linux (PipeWire or PulseAudio) | ✅ | ✅ monitor source via PulseAudio protocol (works with pipewire-pulse) | Optional: Vulkan (build feature) | Untested until CI runs |
 
 Mobile (iOS/Android) is not supported in v1.
@@ -63,8 +63,71 @@ time; neither is needed on macOS, which always builds with Metal):
 
 ```bash
 npm run tauri build -- --features gpu-vulkan   # Vulkan SDK (Windows/Linux)
-npm run tauri build -- --features gpu-cuda     # CUDA toolkit (NVIDIA, Windows/Linux)
+npm run tauri build -- --features gpu-cuda     # development build; CUDA toolkit required
 ```
+
+For a **distributable Windows CUDA build**, use the packaging command below instead.
+The plain feature build does not collect the runtime DLLs.
+
+### Windows CUDA packages (no administrator rights to install or run)
+
+The CUDA flavor produces a **current-user NSIS installer** and a **portable ZIP**.
+Both contain `cudart64_12.dll`, `cublas64_12.dll`, `cublasLt64_12.dll`, and the Microsoft
+Visual C++ runtime DLLs they import, beside `transcriptor.exe`. Users do **not** need
+to install the CUDA Toolkit or Visual C++ Redistributable. CUDA redistribution licenses
+and a `cuda-runtime.json` file with DLL checksums are included.
+
+Prerequisites on the user's PC:
+
+- Windows x64, an AVX2-capable CPU, and an NVIDIA Turing-or-newer GPU (compute capability
+  7.5+). CUDA 12.9.1 builds include kernels for Turing, Ampere, Ada and Blackwell, plus
+  PTX for compatible architectures.
+- An existing compatible NVIDIA display driver. Use **576.57 or newer** for this build,
+  matching [CUDA 12.9 Update 1's driver baseline](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-toolkit-release-notes/index.html#cuda-driver).
+  Installing or updating the driver requires administrator/IT assistance; Transcriptor
+  does not install or bundle `nvcuda.dll`.
+- WebView2 for the UI. The installer can install it per-user if missing. Portable users
+  need WebView2 already present, or should run the per-user installer first.
+
+Install the NSIS package normally (it targets your user profile), or extract **all** ZIP
+contents to a writable folder and launch `transcriptor.exe`. Keep the DLLs beside it.
+Device permissions and organizational application policies still apply.
+
+On a Windows x64 **build machine**, install the Tauri prerequisites, PowerShell 7,
+Visual Studio 2022 C++ tools (including CMake/Ninja), and LLVM/libclang. Then run:
+
+```powershell
+npm ci
+npm run build:windows:cuda -- -Unsigned
+# Signed distribution (Tauri JSON containing your Windows signing settings):
+npm run build:windows:cuda -- -SigningConfig C:\path\to\signing.json
+```
+
+The script downloads SHA-256-pinned CUDA 12.9.1 components into `src-tauri/target/`
+without running an installer or changing the registry/system PATH. It selects VS 2022
+and Ninja, builds the CUDA backend without depending on a GPU in the build machine,
+then recursively inspects Windows DLL imports. Missing redistributables, wrong CPU
+architectures, and an elevated application manifest stop packaging. Output:
+
+- Installer: `src-tauri/target/release/bundle/nsis/`
+- Portable ZIP: `src-tauri/target/release/bundle/cuda-portable/`
+
+Packaging runs `transcriptor.exe --check-runtime` with CUDA removed from the process
+environment and only Windows system directories on PATH. This checks Windows DLL
+loading and exits before UI/GPU initialization. It is **not a GPU inference test**.
+The NVIDIA driver is delay-loaded so this check also works on GPU-less CI runners.
+
+The packaging tests run on any development OS with `npm run test:packaging`. To also
+stage and verify the real NVIDIA DLLs on macOS/Linux, download the pinned files with
+`pwsh -NoProfile -File scripts/setup-windows-cuda.ps1 -Destination /tmp/transcriptor-cuda`
+and run `TRANSCRIPTOR_CUDA_TEST_TOOLKIT=/tmp/transcriptor-cuda npm run test:packaging`.
+This exercises archive assembly and DLL collection; it does not execute Windows code.
+
+Before publishing, validate on a standard (non-admin) Windows account: install/extract
+the package on a PC without a CUDA Toolkit or VC++ Redistributable, launch the UI,
+download a Whisper model, record microphone + system audio, and run local transcription
+on a supported NVIDIA GPU. Repeat with the portable ZIP. Native Windows installation,
+audio capture and CUDA inference have not been verified from the macOS development host.
 
 ## SecondBrain export
 
@@ -177,8 +240,10 @@ cargo run --example whisper_probe -- <model.bin> <file.wav>
 
 `.github/workflows/ci.yml` type-checks and builds the frontend, then runs
 `cargo clippy --all-targets -- -D warnings` and `cargo test` on macOS, Windows, and
-Ubuntu for every push and pull request. `.github/workflows/release.yml` repeats these
-checks before building installers for `v*` tags. Tag builds require macOS signing and
+Ubuntu for every push and pull request, plus `npm run test:packaging` for DLL collection
+and packaging failure cases. `.github/workflows/release.yml` repeats these
+checks before building installers for `v*` tags, including a separate Windows CUDA
+installer/portable ZIP job on Windows Server 2022. Tag builds require macOS signing and
 notarization and Windows signing; missing credentials fail the job instead of quietly
 producing unsigned release installers. Artifacts are uploaded only after verification.
 The workflow can also be run manually with `signed: false` for clearly labelled unsigned

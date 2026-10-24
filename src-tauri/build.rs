@@ -1,6 +1,15 @@
 fn main() {
     tauri_build::build();
 
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var_os("CARGO_FEATURE_GPU_CUDA").is_some()
+    {
+        // Keep startup and the packaging loader check usable without a GPU.
+        // The NVIDIA driver is installed by the OS/admin, never redistributed.
+        println!("cargo:rustc-link-lib=delayimp");
+        println!("cargo:rustc-link-arg=/DELAYLOAD:nvcuda.dll");
+    }
+
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         // whisper.cpp's Metal backend uses Objective-C availability checks.
         // Rust links with -nodefaultlibs, so Clang's availability runtime is

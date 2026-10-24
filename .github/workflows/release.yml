@@ -15,13 +15,22 @@ permissions:
 
 jobs:
   bundle:
-    name: Bundle (${{ matrix.os }})
+    name: Bundle (${{ matrix.os }}, ${{ matrix.flavor }})
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
+        include:
+          - os: macos-latest
+            flavor: cpu
+          - os: windows-latest
+            flavor: cpu
+          - os: ubuntu-latest
+            flavor: cpu
+          # CUDA 12.9 uses the supported Visual Studio 2022 host compiler.
+          - os: windows-2022
+            flavor: cuda
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       RELEASE_SIGNING_REQUIRED: ${{ github.event_name == 'push' || inputs.signed }}
     steps:
@@ -34,6 +43,9 @@ jobs:
 
       - run: npm ci
 
+      - name: Test Windows packaging rules
+        run: npm run test:packaging
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -41,6 +53,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          key: ${{ matrix.flavor }}
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -119,7 +132,11 @@ jobs:
               digestAlgorithm = 'sha256'
               timestampUrl = $env:WINDOWS_TIMESTAMP_URL
             } } } | ConvertTo-Json -Depth 4 | Set-Content $config
-            npm run tauri -- build --ci --config $config -- --locked
+            if ('${{ matrix.flavor }}' -eq 'cuda') {
+              & ./scripts/build-windows-cuda.ps1 -SigningConfig $config
+            } else {
+              npm run tauri -- build --ci --config $config -- --locked
+            }
             if ($LASTEXITCODE -ne 0) { throw 'Windows bundle build failed.' }
             $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe)
             if ($installers.Count -eq 0) { throw 'No Windows installer was produced.' }
@@ -128,17 +145,28 @@ jobs:
                 throw "Installer signature failed: $($installer.Name)"
               }
             }
+            if ('${{ matrix.flavor }}' -eq 'cuda') {
+              $portable = 'src-tauri/target/windows-cuda/portable/transcriptor.exe'
+              if ((Get-AuthenticodeSignature $portable).Status -ne 'Valid') {
+                throw 'Portable CUDA executable signature failed.'
+              }
+            }
           } finally {
             Remove-Item $pfx, $config -Force -ErrorAction SilentlyContinue
             if ($certificate) { Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force }
           }
 
       - name: Build Linux bundle or unsigned test bundles
-        if: runner.os == 'Linux' || env.RELEASE_SIGNING_REQUIRED != 'true'
+        if: matrix.flavor != 'cuda' && (runner.os == 'Linux' || env.RELEASE_SIGNING_REQUIRED != 'true')
         run: npm run tauri -- build --ci --no-sign -- --locked
+
+      - name: Build unsigned Windows CUDA test packages
+        if: matrix.flavor == 'cuda' && env.RELEASE_SIGNING_REQUIRED != 'true'
+        shell: pwsh
+        run: ./scripts/build-windows-cuda.ps1 -Unsigned
 
       - uses: actions/upload-artifact@v4
         with:
-          name: transcriptor-${{ github.ref_name }}-${{ runner.os }}-${{ env.RELEASE_SIGNING_REQUIRED == 'true' && 'release' || 'unsigned-test' }}
+          name: transcriptor-${{ github.ref_name }}-${{ runner.os }}-${{ matrix.flavor }}-${{ env.RELEASE_SIGNING_REQUIRED == 'true' && 'release' || 'unsigned-test' }}
           path: src-tauri/target/release/bundle/
           if-no-files-found: error

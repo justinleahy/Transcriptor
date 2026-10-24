@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test:packaging": "node --test scripts/windows-cuda.test.mjs",
+    "test:packaging": "node --test scripts/windows-cuda.test.mjs scripts/release.test.mjs",
     "build:windows:cuda": "pwsh -NoProfile -File scripts/build-windows-cuda.ps1",
     "tauri": "tauri"
   },

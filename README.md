@@ -246,9 +246,39 @@ checks before building installers for `v*` tags, including a separate Windows CU
 installer/portable ZIP job on Windows Server 2022. Tag builds require macOS signing and
 notarization and Windows signing; missing credentials fail the job instead of quietly
 producing unsigned release installers. Artifacts are uploaded only after verification.
+After all four variants succeed on a version tag, the workflow publishes a GitHub
+Release with five downloads (macOS DMG, Linux AppImage, Windows CPU installer,
+Windows CUDA installer and CUDA portable ZIP) plus `SHA256SUMS.txt`. Filenames include
+the version, platform, architecture and Windows CPU/CUDA variant to avoid collisions.
+The macOS download targets the build runner's architecture; this is not a universal binary.
+Only the publishing job has repository write permission. Uploads go to a draft first;
+an upload failure leaves the draft unpublished, and a retry can finish that draft.
+Already-published releases are never overwritten by the pipeline. Tags containing a
+prerelease version such as `v0.2.0-beta.1` are marked as GitHub prereleases.
 The workflow can also be run manually with `signed: false` for clearly labelled unsigned
 test artifacts. These workflows still need a successful run in the hosting repository;
 local macOS checks do not verify Windows or Linux capture or installation.
+
+### Publish on GitHub
+
+1. Push this repository, including `.github/workflows/`, to your GitHub repository.
+   Set an `origin` remote first if the repository only exists locally.
+2. Add the signing secrets and timestamp variable listed below in the repository's
+   **Settings → Secrets and variables → Actions**. Repository/organization policy must
+   allow the workflow's `contents: write` permission to create releases.
+3. Keep the versions in `package.json`, `src-tauri/Cargo.toml` and
+   `src-tauri/tauri.conf.json` in sync; update their lockfiles as needed. Commit and push.
+4. Create and push the matching version tag, for example `v0.1.0`. The pipeline checks
+   the tag against all three versions before running the packaging jobs. Downloads
+   appear under the repository's **Releases** after all builds and uploads succeed.
+
+To test first without signing credentials, open **Actions → Release → Run workflow**
+and leave **signed** unchecked. Download the four clearly labelled `unsigned-test`
+artifacts from the workflow run. Manual runs do not publish a GitHub Release, even
+when signed. Signing credentials are required for automatic releases from tags.
+
+Local pipeline checks: `npm run test:packaging` and `node scripts/release.mjs metadata`.
+The publication tests use a simulated GitHub API; they never create actual releases.
 
 Configure these repository secrets before tagging a release:
 

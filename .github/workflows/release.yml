@@ -13,9 +13,30 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  prepare:
+    name: Validate release version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: metadata
+        run: node scripts/release.mjs metadata
+      - name: Test release packaging and publication rules
+        run: npm run test:packaging
+
   bundle:
     name: Bundle (${{ matrix.os }}, ${{ matrix.flavor }})
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -165,8 +186,39 @@ jobs:
         shell: pwsh
         run: ./scripts/build-windows-cuda.ps1 -Unsigned
 
+      - name: Stage release packages
+        env:
+          RELEASE_PLATFORM: ${{ runner.os == 'macOS' && 'macos' || runner.os == 'Windows' && 'windows' || 'linux' }}
+          RELEASE_FLAVOR: ${{ matrix.flavor }}
+        run: node scripts/release.mjs stage "$RELEASE_PLATFORM" "$RELEASE_FLAVOR"
+        shell: bash
+
       - uses: actions/upload-artifact@v4
         with:
-          name: transcriptor-${{ github.ref_name }}-${{ runner.os }}-${{ matrix.flavor }}-${{ env.RELEASE_SIGNING_REQUIRED == 'true' && 'release' || 'unsigned-test' }}
-          path: src-tauri/target/release/bundle/
+          name: release-${{ needs.prepare.outputs.version }}-${{ runner.os }}-${{ matrix.flavor }}-${{ env.RELEASE_SIGNING_REQUIRED == 'true' && 'release' || 'unsigned-test' }}
+          path: release-assets/
           if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, bundle]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*-release
+          path: release-assets/
+          merge-multiple: true
+      - name: Upload verified packages and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release.mjs publish

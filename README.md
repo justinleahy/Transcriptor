@@ -18,6 +18,9 @@ searchable library.
   action items, open questions).
 - **Library with full-text search** (SQLite FTS5) over titles and transcripts, with
   audio playback.
+- **SecondBrain export** (optional): finished meetings become searchable `transcript`
+  documents (WebVTT, with speaker segments) in your local SecondBrain knowledge base, and
+  summaries become linked notes.
 - API keys are stored in the OS keychain, never in plain files.
 
 ## Requirements
@@ -63,6 +66,79 @@ npm run tauri build -- --features gpu-vulkan   # Vulkan SDK (Windows/Linux)
 npm run tauri build -- --features gpu-cuda     # CUDA toolkit (NVIDIA, Windows/Linux)
 ```
 
+## SecondBrain export
+
+Transcriptor can send each meeting to SecondBrain, your local-first knowledge base,
+through its REST API (`POST /documents`, with v0.6 approval handling for updates). Turn it on in **Settings →
+SecondBrain**, enter the API URL (default `http://127.0.0.1:7171/v1`), an API key, and
+optionally **Your identity** (your email or name), then use **Test connection**.
+
+- **Transcript document:** each meeting is uploaded once as a WebVTT file (multipart
+  `file=<meeting id>.vtt`, `text/vtt`) plus a `metadata` part
+  `{"type":"transcript","title":…,"tags":[…],"source_url":"transcriptor://meeting/<id>","props":{…}}`.
+  Every transcript segment becomes one cue with a voice tag (`<v Justin>…` / `<v Others>…`)
+  and millisecond timestamps, so SecondBrain's VTT extractor records speaker segments
+  (`speaker`, `start_ms`, `end_ms`) and citations can name who said what and when.
+  `props` follow the `brain:type/transcript/1` schema exactly: `participants`,
+  `started_at` (UTC; SecondBrain derives `occurred_at` from it), `duration_ms`, and
+  `recording_url` (`file://` path of the local WAV; the audio itself is not uploaded).
+- **Your identity:** used as the speaker name for your side of the conversation and as the
+  transcript's only participant (emails are lower-cased). The other side is always
+  labelled "Others" and is never sent as a participant, so no fake people are created.
+  When the field is empty your side is labelled "You" and `participants` is empty.
+- **Notes document:** once a meeting has a Claude summary, it is saved as a separate `note`
+  titled "<meeting> — notes" with the summary Markdown as `content`, your tags plus
+  `summary`, and `source_url: transcriptor://meeting/<id>#summary`. Regenerating the summary
+  proposes an update to that note; approve it in SecondBrain to apply the change.
+- **When:** with *Export automatically* on (the default), when transcription finishes, and
+  again after a summary is generated. A meeting that was already exported is re-exported
+  after a new summary even with auto-export off. You can always export or re-export from
+  the meeting's page, which shows the export status, the document ids, and the last error.
+  Automatic exports are skipped when the transcript, its metadata, and the summary are all
+  unchanged since the last success. *Wait for indexing* adds `?wait=30`; `200`, `201`, and
+  `202` (accepted, still indexing) all count as success and the job id is recorded.
+- **Updates and revisions:** a transcript's content is immutable once uploaded, so later
+  exports only `PATCH /documents/<id>` its `title` and `tags`; the note is patched with
+  `title`, `content`, and `tags`. Every `PATCH` sends `If-Match: "<revision>"` with the
+  revision stored from the last response (`document.revision` or `ETag`). On
+  `412 revision-mismatch` Transcriptor takes `current_revision` from the error (or re-reads
+  the document) and retries once. Under v0.6, a key's title/content updates return an
+  approval proposal (`202 pending_id`). The meeting shows **Awaiting approval** and
+  preserves the last committed revision and export time. Approve the proposal in
+  SecondBrain, then click **Check approval**: Transcriptor reads the document and only
+  marks the update exported when the proposed values and a newer revision are present.
+  Outstanding proposal ids and their intended values survive app restarts, and checks
+  do not resubmit the proposal. Unchanged fields do not generate new proposals. If a
+  document was deleted in SecondBrain (404), a new one is created.
+- **Idempotency:** each `POST` carries `Idempotency-Key:
+  transcriptor-<meeting id>-<16 hex chars of the payload's sha256>`, so a retried request
+  never creates a duplicate and a changed payload never reuses a key. POST/GET connection
+  errors and 5xx responses are retried up to 3 times with the same key; PATCH is not
+  automatically retried after an ambiguous failure because it can create a second proposal.
+  4xx errors are not retried (apart from revision recovery), and
+  SecondBrain's problem `type` (`validation-error`, `revision-mismatch`, …) is shown in the
+  error message.
+- **API key:** create one with `brain keys create`, name it `transcriptor`, and give it the
+  `read` and `write` scopes (reads verify approved updates and **Test connection**). SecondBrain records
+  provenance from the key name, so exported documents show `source: api:transcriptor`. The key is kept in the OS keychain, and changing the
+  SecondBrain URL to a different host or port deletes it.
+- **Test connection:** calls `GET /health` (no auth) to see whether the server is reachable,
+  then `GET /stats` with your key: "Connected" when the key is accepted, "Key rejected" on
+  401/403 (a key without `read` gets 403 here even though it can still export).
+- **Plain HTTP:** the URL must be `https://` unless it points at localhost. SecondBrain v1
+  runs without TLS inside your VPN, so **Allow plain HTTP on my private network** also
+  accepts `http://` for private addresses (192.168.x.x, 10.x.x.x, 172.16–31.x.x,
+  169.254.x.x, IPv6 `fc00::/7` and `fe80::/10`), single-label host names, and `*.lan`,
+  `*.local`, `*.internal`, `*.home`, `*.home.arpa`, `*.localdomain` names. Traffic, including
+  the API key, is then unencrypted; plain `http://` to any other host is always rejected.
+
+SecondBrain itself is still at the spec stage. Creation follows the transcript schemas;
+updates handle v0.6 approval proposals. This integration has not been run against a real
+server. Approval checks require the document endpoint to expose title/tags and, for notes,
+the Markdown body as `content` or `text` when requested with `?include=text`; missing fields
+leave the update awaiting approval. Cloudflare Access service tokens and custom/private
+certificate authorities are not configured by this client.
+
 ## Develop
 
 ```bash
@@ -101,16 +177,36 @@ cargo run --example whisper_probe -- <model.bin> <file.wav>
 
 `.github/workflows/ci.yml` type-checks and builds the frontend, then runs
 `cargo clippy --all-targets -- -D warnings` and `cargo test` on macOS, Windows, and
-Ubuntu for every push and pull request. `.github/workflows/release.yml` builds unsigned
-bundles on all three OSes for `v*` tags and uploads them as workflow artifacts. Both
-workflows are new and **have not run yet**; Windows and Linux builds have so far only
-been type-checked from macOS for the audio module.
+Ubuntu for every push and pull request. `.github/workflows/release.yml` repeats these
+checks before building installers for `v*` tags. Tag builds require macOS signing and
+notarization and Windows signing; missing credentials fail the job instead of quietly
+producing unsigned release installers. Artifacts are uploaded only after verification.
+The workflow can also be run manually with `signed: false` for clearly labelled unsigned
+test artifacts. These workflows still need a successful run in the hosting repository;
+local macOS checks do not verify Windows or Linux capture or installation.
+
+Configure these repository secrets before tagging a release:
+
+- macOS: `APPLE_CERTIFICATE` (base64 Developer ID Application `.p12`),
+  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
+  `APPLE_PASSWORD` (app-specific password), and `APPLE_TEAM_ID`.
+- Windows: `WINDOWS_CERTIFICATE` (base64 signing `.pfx`) and
+  `WINDOWS_CERTIFICATE_PASSWORD`; set the repository variable `WINDOWS_TIMESTAMP_URL`
+  to your certificate provider's timestamp service. The certificate must support
+  signing on the runner; hardware-backed providers require their own signing setup.
+
+See Tauri's [macOS signing](https://tauri.app/distribute/sign/macos/) and
+[Windows signing](https://tauri.app/distribute/sign/windows/) instructions.
 
 ## Build a release bundle
 
 ```bash
 npm run tauri build
 ```
+
+For a local unsigned test build: `npm run tauri -- build --ci --no-sign`.
+On macOS, the build discovers the active Xcode Clang runtime needed by Whisper's
+Metal availability checks; no Xcode-version-specific path is required.
 
 Installers are deliberately limited to ones that **do not need administrator rights**:
 
@@ -140,6 +236,7 @@ src-tauri/src/
   transcribe/cloud.rs    OpenAI-compatible HTTP engine
   transcribe/models.rs   model catalogue + downloads
   summarize.rs           Claude Messages API (raw HTTP); long transcripts summarized in parts
+  export.rs              SecondBrain export: WebVTT/metadata builders, REST client, auto-export triggers
   net.rs                 bounded HTTP response bodies
   fs_perms.rs            owner-only file/dir permissions (Unix)
   recorder.rs            session orchestration: capture → WAV + chunks → transcriber → DB/events

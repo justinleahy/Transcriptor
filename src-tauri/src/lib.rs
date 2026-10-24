@@ -1,6 +1,7 @@
 pub mod audio;
 mod commands;
 pub mod db;
+pub mod export;
 pub mod fs_perms;
 pub mod models;
 pub mod net;
@@ -53,6 +54,8 @@ pub fn run() {
             commands::rename_meeting,
             commands::delete_meeting,
             commands::summarize_meeting,
+            commands::export_meeting,
+            commands::secondbrain_status,
             commands::list_local_models,
             commands::download_model,
             commands::delete_model,

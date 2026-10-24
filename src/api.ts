@@ -9,6 +9,7 @@ import type {
   MeetingListItem,
   ModelInfo,
   RecordingStatus,
+  SecondBrainStatus,
   SecretName,
   Settings,
 } from "./types";
@@ -44,6 +45,10 @@ export const api = {
   deleteMeeting: (id: string) => invoke<void>("delete_meeting", { id }),
   summarizeMeeting: (id: string) =>
     invoke<Meeting>("summarize_meeting", { id }),
+
+  // SecondBrain
+  exportMeeting: (id: string) => invoke<Meeting>("export_meeting", { id }),
+  secondbrainStatus: () => invoke<SecondBrainStatus>("secondbrain_status"),
 
   // Local models
   listLocalModels: () => invoke<ModelInfo[]>("list_local_models"),

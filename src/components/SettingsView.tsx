@@ -3,7 +3,14 @@ import { api } from "../api";
 import { useEvent } from "../hooks/useEvent";
 import { useToast } from "../hooks/useToast";
 import { formatBytes, formatSizeMb } from "../lib/format";
-import type { AudioDevices, ModelInfo, ModelProgress, SecretName, Settings } from "../types";
+import type {
+  AudioDevices,
+  ModelInfo,
+  ModelProgress,
+  SecondBrainStatus,
+  SecretName,
+  Settings,
+} from "../types";
 
 interface SecretState {
   saved: boolean | null; // null = unknown/loading
@@ -26,7 +33,12 @@ export function SettingsView() {
   const [secrets, setSecrets] = useState<Record<SecretName, SecretState>>({
     openai_api_key: { saved: null, draft: "", busy: false },
     anthropic_api_key: { saved: null, draft: "", busy: false },
+    secondbrain_api_key: { saved: null, draft: "", busy: false },
   });
+  // SecondBrain tags are edited as comma-separated text.
+  const [tagsDraft, setTagsDraft] = useState("");
+  const [testing, setTesting] = useState(false);
+  const [sbStatus, setSbStatus] = useState<SecondBrainStatus | null>(null);
 
   const refreshModels = useCallback(async () => {
     try {
@@ -50,7 +62,10 @@ export function SettingsView() {
     (async () => {
       try {
         const s = await api.getSettings();
-        if (!cancelled) setSettings(s);
+        if (!cancelled) {
+          setSettings(s);
+          setTagsDraft(s.secondbrain_tags.join(", "));
+        }
       } catch (err) {
         toast.error(err);
       }
@@ -61,7 +76,11 @@ export function SettingsView() {
         toast.error(err);
       }
       await refreshModels();
-      await Promise.all([refreshSecret("openai_api_key"), refreshSecret("anthropic_api_key")]);
+      await Promise.all([
+        refreshSecret("openai_api_key"),
+        refreshSecret("anthropic_api_key"),
+        refreshSecret("secondbrain_api_key"),
+      ]);
     })();
     return () => {
       cancelled = true;
@@ -89,14 +108,19 @@ export function SettingsView() {
         cloud_base_url: settings.cloud_base_url.trim(),
         cloud_model: settings.cloud_model.trim(),
         claude_model: settings.claude_model.trim(),
+        secondbrain_url: settings.secondbrain_url.trim(),
+        secondbrain_tags: parseTags(tagsDraft),
+        secondbrain_identity: settings.secondbrain_identity.trim(),
       });
       setSettings(saved);
+      setTagsDraft(saved.secondbrain_tags.join(", "));
       setDirty(false);
-      // Changing the cloud endpoint's origin clears the stored cloud key on
-      // the backend; re-check so the form shows it needs re-entering.
-      await refreshSecret("openai_api_key");
+      setSbStatus(null);
+      // Changing the cloud or SecondBrain endpoint's origin clears that stored
+      // key on the backend; re-check so the form shows it needs re-entering.
+      await Promise.all([refreshSecret("openai_api_key"), refreshSecret("secondbrain_api_key")]);
       // Persist any API keys typed into the form.
-      for (const name of ["openai_api_key", "anthropic_api_key"] as SecretName[]) {
+      for (const name of ["openai_api_key", "anthropic_api_key", "secondbrain_api_key"] as SecretName[]) {
         if (secrets[name].draft.trim()) {
           await saveSecret(name);
         }
@@ -165,6 +189,18 @@ export function SettingsView() {
     }
   }
 
+  async function handleTestSecondBrain() {
+    setTesting(true);
+    setSbStatus(null);
+    try {
+      setSbStatus(await api.secondbrainStatus());
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setTesting(false);
+    }
+  }
+
   async function handleOpenDataDir() {
     try {
       await api.openDataDir();
@@ -203,7 +239,7 @@ export function SettingsView() {
         <header className="view-header row-between">
           <div>
             <h1>Settings</h1>
-            <p className="muted">Transcription, API keys and audio capture.</p>
+            <p className="muted">Transcription, API keys, audio capture and SecondBrain export.</p>
           </div>
           <div className="row-gap">
             <button type="button" className="btn btn-sm" onClick={handleOpenDataDir}>
@@ -397,6 +433,154 @@ export function SettingsView() {
           </div>
         </fieldset>
 
+        {/* SecondBrain */}
+        <fieldset className="card settings-section">
+          <legend>SecondBrain</legend>
+          <p className="muted small">
+            Send finished meetings to your SecondBrain knowledge base as searchable transcript
+            documents.
+          </p>
+          <div className="field-grid">
+            <label className="field field-check">
+              <input
+                type="checkbox"
+                checked={settings.secondbrain_enabled}
+                onChange={(e) => update("secondbrain_enabled", e.target.checked)}
+              />
+              <span>Export meetings to SecondBrain</span>
+            </label>
+            <label className="field">
+              <span className="field-label">API URL</span>
+              <input
+                className="input"
+                type="url"
+                value={settings.secondbrain_url}
+                onChange={(e) => update("secondbrain_url", e.target.value)}
+                placeholder="http://127.0.0.1:7171/v1"
+              />
+            </label>
+            <label className="field field-check">
+              <input
+                type="checkbox"
+                checked={settings.secondbrain_allow_private_http}
+                onChange={(e) => update("secondbrain_allow_private_http", e.target.checked)}
+              />
+              <span>
+                Allow plain HTTP on my private network
+                <span className="muted small block">
+                  Unencrypted: the API key and meetings travel in clear text. Only for addresses like
+                  192.168.x.x, 10.x.x.x or *.lan behind your VPN or home network.
+                </span>
+              </span>
+            </label>
+            <SecretField
+              label="API key"
+              state={secrets.secondbrain_api_key}
+              onChange={(draft) =>
+                setSecrets((prev) => ({
+                  ...prev,
+                  secondbrain_api_key: { ...prev.secondbrain_api_key, draft },
+                }))
+              }
+              onSave={() => saveSecret("secondbrain_api_key")}
+              onRemove={() => removeSecret("secondbrain_api_key")}
+            />
+            <label className="field field-check">
+              <input
+                type="checkbox"
+                checked={settings.secondbrain_auto_export}
+                onChange={(e) => update("secondbrain_auto_export", e.target.checked)}
+              />
+              <span>
+                Export automatically when transcription finishes
+                <span className="muted small block">
+                  Also re-exports when a summary is generated.
+                </span>
+              </span>
+            </label>
+            <label className="field field-check">
+              <input
+                type="checkbox"
+                checked={settings.secondbrain_wait_for_index}
+                onChange={(e) => update("secondbrain_wait_for_index", e.target.checked)}
+              />
+              <span>
+                Wait for indexing
+                <span className="muted small block">
+                  Waits up to 30 seconds. Indexing may continue after the export is accepted.
+                </span>
+              </span>
+            </label>
+            <label className="field">
+              <span className="field-label">Your identity (email or name)</span>
+              <input
+                className="input"
+                type="text"
+                value={settings.secondbrain_identity}
+                onChange={(e) => update("secondbrain_identity", e.target.value)}
+                placeholder="you@example.com"
+                autoComplete="email"
+              />
+              <span className="muted small">
+                Used as the speaker name and participant for your side. Leave empty to label it
+                "You" with no participant.
+              </span>
+            </label>
+            <label className="field">
+              <span className="field-label">Tags</span>
+              <input
+                className="input"
+                type="text"
+                value={tagsDraft}
+                onChange={(e) => {
+                  setTagsDraft(e.target.value);
+                  setDirty(true);
+                }}
+                placeholder="meeting, transcriptor"
+              />
+              <span className="muted small">Comma-separated; added to every exported meeting.</span>
+            </label>
+            <div className="field">
+              <div className="row-gap">
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={handleTestSecondBrain}
+                  disabled={testing || dirty || !!secrets.secondbrain_api_key.draft.trim()}
+                  title={dirty ? "Save settings first" : undefined}
+                >
+                  {testing && <span className="spinner spinner-xs" aria-hidden="true" />}
+                  {testing ? "Testing..." : "Test connection"}
+                </button>
+                {sbStatus && sbStatus.reachable === true && sbStatus.key_ok === true && (
+                  <span className="badge badge-done">Connected</span>
+                )}
+                {sbStatus && sbStatus.reachable === true && sbStatus.key_ok === false && (
+                  <span className="badge badge-failed">Key rejected</span>
+                )}
+                {sbStatus && sbStatus.reachable === true && sbStatus.key_ok === null && (
+                  <span className="badge badge-processing">Reachable</span>
+                )}
+                {sbStatus && sbStatus.reachable === false && (
+                  <span className="badge badge-failed">Not connected</span>
+                )}
+              </div>
+              {(dirty || !!secrets.secondbrain_api_key.draft.trim()) && (
+                <span className="muted small">Save settings to test the connection.</span>
+              )}
+              {sbStatus && (
+                <span
+                  className={`small${
+                    sbStatus.reachable === false || sbStatus.key_ok === false ? " text-danger" : " muted"
+                  }`}
+                >
+                  {sbStatus.message}
+                </span>
+              )}
+            </div>
+          </div>
+        </fieldset>
+
         {/* Audio */}
         <fieldset className="card settings-section">
           <legend>Audio</legend>
@@ -507,6 +691,13 @@ export function SettingsView() {
 function clampChunk(n: number): number {
   if (!Number.isFinite(n)) return 8;
   return Math.min(60, Math.max(2, Math.round(n)));
+}
+
+function parseTags(text: string): string[] {
+  return text
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
 }
 
 function hasDrafts(secrets: Record<SecretName, SecretState>): boolean {

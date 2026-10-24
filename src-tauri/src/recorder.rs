@@ -205,6 +205,7 @@ struct ActiveSession {
     capture: Option<CaptureHandle>,
     processing: Option<JoinHandle<Result<i64>>>,
     stop_flag: Arc<AtomicBool>,
+    recording_stopped: Sender<()>,
 }
 
 pub struct Recorder {
@@ -325,6 +326,11 @@ impl Recorder {
             transcription_mode: settings.transcription_mode,
             summary: None,
             summarized_at: None,
+            export_status: None,
+            export_document_id: None,
+            exported_at: None,
+            export_error: None,
+            export_summary_document_id: None,
         };
         db.create_meeting(&meeting)?;
 
@@ -332,6 +338,7 @@ impl Recorder {
         // Bounded so a slow transcriber can't grow memory without limit; the
         // processing thread drops chunks (never blocks) when it's full.
         let (chunk_tx, chunk_rx) = bounded::<SourceChunk>(chunk_queue_capacity(settings.chunk_seconds));
+        let (recording_stopped, stopped_rx) = bounded(1);
 
         // Transcription worker: owns the engine, writes segments, emits events.
         spawn_transcribe_thread(
@@ -341,6 +348,7 @@ impl Recorder {
             data_dir.clone(),
             id.clone(),
             chunk_rx,
+            stopped_rx,
         );
 
         // Processing worker: resample, write WAV, chunk, levels, status ticks.
@@ -362,6 +370,7 @@ impl Recorder {
             capture: Some(capture),
             processing: Some(processing),
             stop_flag,
+            recording_stopped,
         });
 
         let _ = app.emit(
@@ -408,6 +417,9 @@ impl Recorder {
             meeting.audio_path.as_deref(),
             MeetingStatus::Processing,
         )?;
+        // The transcriber may already have drained its queue. Release it only
+        // after duration/end time and Processing have been saved.
+        let _ = session.recording_stopped.send(());
         let meeting = db.require_meeting(&meeting.id)?;
         let _ = app.emit(events::RECORDING_STATUS, RecordingStatus::idle());
         let _ = app.emit(events::MEETING_UPDATED, meeting.clone());
@@ -657,6 +669,13 @@ fn spawn_processing_thread(
     Ok(handle)
 }
 
+fn mark_transcription_done(db: &Db, meeting_id: &str, stopped: Receiver<()>) -> Result<()> {
+    // A disconnected sender also releases the worker if start/stop failed.
+    let _ = stopped.recv();
+    db.set_status(meeting_id, MeetingStatus::Done)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn spawn_transcribe_thread(
     app: AppHandle,
     db: Arc<Db>,
@@ -664,6 +683,7 @@ fn spawn_transcribe_thread(
     data_dir: PathBuf,
     meeting_id: String,
     chunk_rx: Receiver<SourceChunk>,
+    stopped: Receiver<()>,
 ) {
     let _ = std::thread::Builder::new()
         .name("transcribe".into())
@@ -731,11 +751,14 @@ fn spawn_transcribe_thread(
 
             // Channel closed: recording stopped and all chunks handled.
             drop(transcriber);
-            if let Err(e) = db.set_status(&meeting_id, MeetingStatus::Done) {
+            if let Err(e) = mark_transcription_done(&db, &meeting_id, stopped) {
                 log::error!("marking meeting done: {e}");
             }
             if let Ok(m) = db.require_meeting(&meeting_id) {
                 let _ = app.emit(events::MEETING_UPDATED, m);
+            }
+            if !SHUTTING_DOWN.load(Ordering::SeqCst) {
+                crate::export::spawn_auto_export(&app, &meeting_id, crate::export::Trigger::Transcribed);
             }
         });
 }
@@ -743,6 +766,41 @@ fn spawn_transcribe_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcription_completion_waits_for_recording_metadata() {
+        let dir = std::env::temp_dir().join(format!("transcriptor-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Db::open(&dir.join("test.sqlite")).unwrap());
+        let meeting = Meeting {
+            id: "stop-race".into(), title: "Stop race".into(),
+            started_at: Utc::now().to_rfc3339(), ended_at: None, duration_ms: 0,
+            status: MeetingStatus::Recording, audio_path: None,
+            transcription_mode: TranscriptionMode::Local, summary: None, summarized_at: None,
+            export_status: None, export_document_id: None, exported_at: None,
+            export_error: None, export_summary_document_id: None,
+        };
+        db.create_meeting(&meeting).unwrap();
+        let (stopped_tx, stopped_rx) = bounded(1);
+        let (done_tx, done_rx) = bounded(1);
+        let worker_db = db.clone();
+        let worker = std::thread::spawn(move || {
+            mark_transcription_done(&worker_db, "stop-race", stopped_rx).unwrap();
+            done_tx.send(()).unwrap();
+        });
+        // The transcription queue can drain before stop has saved metadata.
+        assert_eq!(done_rx.recv_timeout(Duration::from_millis(50)), Err(RecvTimeoutError::Timeout));
+        assert_eq!(db.require_meeting("stop-race").unwrap().status, MeetingStatus::Recording);
+        db.finish_meeting("stop-race", "2026-10-24T10:00:00Z", 1234, None, MeetingStatus::Processing).unwrap();
+        stopped_tx.send(()).unwrap();
+        worker.join().unwrap();
+        let finished = db.require_meeting("stop-race").unwrap();
+        assert_eq!(finished.status, MeetingStatus::Done);
+        assert_eq!(finished.duration_ms, 1234);
+        assert_eq!(finished.ended_at.as_deref(), Some("2026-10-24T10:00:00Z"));
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn queue_capacity_covers_three_minutes() {

@@ -3,6 +3,15 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      signed:
+        description: Build signed distribution installers (requires signing secrets)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 jobs:
   bundle:
@@ -12,6 +21,9 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      RELEASE_SIGNING_REQUIRED: ${{ github.event_name == 'push' || inputs.signed }}
     steps:
       - uses: actions/checkout@v4
 
@@ -23,6 +35,8 @@ jobs:
       - run: npm ci
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -46,12 +60,85 @@ jobs:
           }
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      # Unsigned bundles: .app/.dmg (macOS), NSIS .exe (Windows), AppImage (Linux).
-      - name: Build bundles
-        run: npm run tauri build
+      - name: Build frontend
+        run: npm run build
+
+      - name: Check Rust
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test Rust
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      # Tag builds require signing. Manual unsigned builds are test artifacts.
+      - name: Build signed and notarized macOS bundles
+        if: runner.os == 'macOS' && env.RELEASE_SIGNING_REQUIRED == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing signing secret: $name (see README release setup)."
+              exit 1
+            fi
+          done
+          npm run tauri -- build --ci -- --locked
+          codesign --verify --deep --strict src-tauri/target/release/bundle/macos/Transcriptor.app
+          xcrun stapler validate src-tauri/target/release/bundle/macos/Transcriptor.app
+
+      - name: Build signed Windows installer
+        if: runner.os == 'Windows' && env.RELEASE_SIGNING_REQUIRED == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          foreach ($name in @('WINDOWS_CERTIFICATE', 'WINDOWS_CERTIFICATE_PASSWORD', 'WINDOWS_TIMESTAMP_URL')) {
+            if (-not [Environment]::GetEnvironmentVariable($name)) {
+              throw "Missing signing setting: $name (see README release setup)."
+            }
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP 'transcriptor-signing.pfx'
+          $config = Join-Path $env:RUNNER_TEMP 'transcriptor-signing.json'
+          $certificate = $null
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password |
+              Where-Object HasPrivateKey | Select-Object -First 1
+            if (-not $certificate) { throw 'Signing certificate has no private key.' }
+            @{ bundle = @{ windows = @{
+              certificateThumbprint = $certificate.Thumbprint
+              digestAlgorithm = 'sha256'
+              timestampUrl = $env:WINDOWS_TIMESTAMP_URL
+            } } } | ConvertTo-Json -Depth 4 | Set-Content $config
+            npm run tauri -- build --ci --config $config -- --locked
+            if ($LASTEXITCODE -ne 0) { throw 'Windows bundle build failed.' }
+            $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe)
+            if ($installers.Count -eq 0) { throw 'No Windows installer was produced.' }
+            foreach ($installer in $installers) {
+              if ((Get-AuthenticodeSignature $installer.FullName).Status -ne 'Valid') {
+                throw "Installer signature failed: $($installer.Name)"
+              }
+            }
+          } finally {
+            Remove-Item $pfx, $config -Force -ErrorAction SilentlyContinue
+            if ($certificate) { Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force }
+          }
+
+      - name: Build Linux bundle or unsigned test bundles
+        if: runner.os == 'Linux' || env.RELEASE_SIGNING_REQUIRED != 'true'
+        run: npm run tauri -- build --ci --no-sign -- --locked
 
       - uses: actions/upload-artifact@v4
         with:
-          name: transcriptor-${{ github.ref_name }}-${{ runner.os }}
+          name: transcriptor-${{ github.ref_name }}-${{ runner.os }}-${{ env.RELEASE_SIGNING_REQUIRED == 'true' && 'release' || 'unsigned-test' }}
           path: src-tauri/target/release/bundle/
           if-no-files-found: error

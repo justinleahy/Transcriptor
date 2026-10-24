@@ -89,7 +89,8 @@ a later part settles, and keep the supporting timestamps from the partial notes.
     "Use only timestamps that appear in the partial notes.\n"
 );
 
-fn fmt_ts(ms: i64) -> String {
+/// Transcript timestamp: `mm:ss`, or `hh:mm:ss` from the first hour on.
+pub fn fmt_ts(ms: i64) -> String {
     let s = ms / 1000;
     if s >= 3600 {
         format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
@@ -104,14 +105,25 @@ fn neutralize(text: &str) -> String {
     text.replace('<', "‹").replace('>', "›")
 }
 
+/// Display label for a speaker in rendered transcripts.
+pub fn speaker_label(speaker: crate::models::Speaker) -> &'static str {
+    match speaker {
+        crate::models::Speaker::You => "You",
+        crate::models::Speaker::Others => "Others",
+    }
+}
+
+/// One transcript line, `[mm:ss] You: text` (no trailing newline), as used in
+/// the Claude prompt.
+pub fn transcript_line(segment: &TranscriptSegment, text: &str) -> String {
+    format!("[{}] {}: {}", fmt_ts(segment.start_ms), speaker_label(segment.speaker), text)
+}
+
 pub fn render_transcript(segments: &[TranscriptSegment]) -> String {
     let mut out = String::new();
     for s in segments {
-        let who = match s.speaker {
-            crate::models::Speaker::You => "You",
-            crate::models::Speaker::Others => "Others",
-        };
-        out.push_str(&format!("[{}] {}: {}\n", fmt_ts(s.start_ms), who, neutralize(s.text.trim())));
+        out.push_str(&transcript_line(s, &neutralize(s.text.trim())));
+        out.push('\n');
     }
     out
 }
@@ -308,6 +320,11 @@ mod tests {
             transcription_mode: TranscriptionMode::Local,
             summary: None,
             summarized_at: None,
+            export_status: None,
+            export_document_id: None,
+            exported_at: None,
+            export_error: None,
+            export_summary_document_id: None,
         }
     }
 

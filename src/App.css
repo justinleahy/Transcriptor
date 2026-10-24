@@ -928,6 +928,28 @@ select.input {
   height: 36px;
 }
 
+.export-card .card-header {
+  margin-bottom: 0;
+}
+
+.export-status {
+  min-width: 0;
+}
+
+.export-docs {
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.export-chip-failed {
+  display: inline-block;
+  max-width: 36em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
 .summary-card .markdown {
   user-select: text;
 }

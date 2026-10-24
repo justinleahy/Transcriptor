@@ -4,7 +4,7 @@ import { api } from "../api";
 import { useEvent } from "../hooks/useEvent";
 import { useToast } from "../hooks/useToast";
 import { formatClock, formatDate, formatDuration, speakerLabel } from "../lib/format";
-import type { MeetingDetail, Speaker, TranscriptSegment } from "../types";
+import type { Meeting, MeetingDetail, Speaker, TranscriptSegment } from "../types";
 import { Markdown } from "./Markdown";
 import { StatusBadge } from "./StatusBadge";
 
@@ -33,6 +33,36 @@ function groupBySpeaker(segments: TranscriptSegment[]): SpeakerGroup[] {
   return groups;
 }
 
+function ExportChip({ meeting }: { meeting: Meeting }) {
+  switch (meeting.export_status) {
+    case "awaiting_approval":
+      return <span className="badge badge-processing">Awaiting approval</span>;
+    case "pending":
+      return (
+        <span className="badge badge-processing">
+          <span className="spinner spinner-xs" aria-hidden="true" />
+          Pending
+        </span>
+      );
+    case "exported":
+      return (
+        <span className="badge badge-done">
+          Exported{meeting.exported_at ? ` ${formatDate(meeting.exported_at)}` : ""}
+        </span>
+      );
+    case "failed": {
+      const text = `Failed: ${meeting.export_error ?? "unknown error"}`;
+      return (
+        <span className="badge badge-failed export-chip-failed" title={text}>
+          {text}
+        </span>
+      );
+    }
+    default:
+      return <span className="badge">Never exported</span>;
+  }
+}
+
 function transcriptAsText(groups: SpeakerGroup[]): string {
   return groups
     .map(
@@ -53,6 +83,24 @@ export function MeetingDetailView({ id, onBack, onDeleted }: MeetingDetailViewPr
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  // null while loading; the export card is hidden for users who don't use SecondBrain.
+  const [secondbrainEnabled, setSecondbrainEnabled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getSettings()
+      .then((s) => {
+        if (!cancelled) setSecondbrainEnabled(s.secondbrain_enabled);
+      })
+      .catch(() => {
+        if (!cancelled) setSecondbrainEnabled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -132,6 +180,27 @@ export function MeetingDetailView({ id, onBack, onDeleted }: MeetingDetailViewPr
     }
   }
 
+  async function handleExport() {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const meeting = await api.exportMeeting(id);
+      setDetail((prev) => (prev ? { ...prev, meeting } : prev));
+      toast.push(
+        meeting.export_status === "awaiting_approval"
+          ? "Update awaiting approval in SecondBrain"
+          : "Exported to SecondBrain",
+        meeting.export_status === "awaiting_approval" ? "info" : "success",
+      );
+    } catch (err) {
+      toast.error(err);
+      // The failure is recorded on the meeting; refetch to show it.
+      void load();
+    } finally {
+      setExporting(false);
+    }
+  }
+
   async function handleCopy() {
     try {
       await navigator.clipboard.writeText(transcriptAsText(groups));
@@ -186,6 +255,15 @@ export function MeetingDetailView({ id, onBack, onDeleted }: MeetingDetailViewPr
   const { meeting, segments } = detail;
   const isRecording = meeting.status === "recording";
   const canSummarize = segments.length > 0 && !isRecording && !summarizing;
+  const isProcessing = meeting.status === "processing";
+  const exportPending = exporting || meeting.export_status === "pending";
+  const canExport =
+    secondbrainEnabled === true &&
+    segments.length > 0 &&
+    !isRecording &&
+    !isProcessing &&
+    !exportPending;
+  const showExport = secondbrainEnabled === true || meeting.export_status !== null;
 
   return (
     <section className="view detail-view">
@@ -218,6 +296,62 @@ export function MeetingDetailView({ id, onBack, onDeleted }: MeetingDetailViewPr
       {meeting.audio_path && (
         <div className="audio-row">
           <audio controls preload="metadata" src={convertFileSrc(meeting.audio_path)} />
+        </div>
+      )}
+
+      {showExport && (
+        <div className="card export-card">
+          <div className="card-header">
+            <div className="row-gap export-status">
+              <h2>SecondBrain</h2>
+              <ExportChip meeting={meeting} />
+            </div>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={handleExport}
+              disabled={!canExport}
+              title={
+                secondbrainEnabled !== true
+                  ? "Enable SecondBrain export in Settings"
+                  : isRecording
+                    ? "Stop the recording first"
+                    : isProcessing
+                      ? "Wait for transcription to finish"
+                      : segments.length === 0
+                        ? "No transcript to export"
+                        : undefined
+              }
+            >
+              {exportPending && <span className="spinner spinner-xs" aria-hidden="true" />}
+              {exportPending
+                ? "Exporting..."
+                : meeting.export_status === "awaiting_approval"
+                  ? "Check approval"
+                : meeting.export_document_id
+                  ? "Re-export"
+                  : "Export to SecondBrain"}
+            </button>
+          </div>
+          {meeting.export_status === "awaiting_approval" && (
+            <p className="muted small">{meeting.export_error}</p>
+          )}
+          {(meeting.export_document_id || meeting.export_summary_document_id) && (
+            <p className="muted small export-docs">
+              {meeting.export_document_id && (
+                <span>
+                  Transcript <code>{meeting.export_document_id}</code>
+                </span>
+              )}
+              {meeting.export_document_id && meeting.export_summary_document_id && " · "}
+              {meeting.export_summary_document_id && (
+                <span>
+                  Notes <code>{meeting.export_summary_document_id}</code>
+                </span>
+              )}
+              {meeting.summary && !meeting.export_summary_document_id && " · Notes not exported yet"}
+            </p>
+          )}
         </div>
       )}
 

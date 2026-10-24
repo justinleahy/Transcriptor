@@ -3,12 +3,12 @@
 use crate::db::Db;
 use crate::models::{
     events, AudioDevices, Meeting, MeetingDetail, MeetingListItem, ModelInfo, RecordingStatus,
-    Settings,
+    SecondBrainStatus, Settings,
 };
 use crate::recorder::Recorder;
 use crate::settings::{self as secrets, SettingsStore};
 use crate::transcribe::models as whisper_models;
-use crate::{audio, summarize};
+use crate::{audio, export, summarize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
@@ -155,7 +155,25 @@ pub async fn summarize_meeting(
         .map_err(err)?;
     let m = state.db.require_meeting(&id).map_err(err)?;
     let _ = app.emit(events::MEETING_UPDATED, m.clone());
+    // Push the new summary to SecondBrain if this meeting is (to be) exported.
+    export::spawn_auto_export(&app, &id, export::Trigger::Summarized);
     Ok(m)
+}
+
+#[tauri::command]
+pub async fn export_meeting(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Meeting> {
+    export::export_now(&app, state.db.clone(), state.settings.clone(), &id)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn secondbrain_status(state: State<'_, AppState>) -> CmdResult<SecondBrainStatus> {
+    Ok(export::status(&state.settings.get()).await)
 }
 
 #[tauri::command]

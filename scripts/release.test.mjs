@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { releaseMetadata, stageAssets, prepareReleaseAssets, publishRelease } from './release.mjs';
+import { cleanBuildOutputs, releaseMatrix, releaseMetadata, stageAssets, prepareReleaseAssets, publishRelease } from './release.mjs';
 
 const version = '0.1.0';
 const metadata = {version, tag: `v${version}`, prerelease: false};
@@ -27,6 +27,23 @@ function versions(root, tauri = version, packageVersion = version) {
   writeFileSync(join(root, 'src-tauri/tauri.conf.json'), JSON.stringify({version: tauri}));
   writeFileSync(join(root, 'src-tauri/Cargo.toml'), `[package]\nname = "transcriptor"\nversion = "${packageVersion}"\n`);
 }
+
+test('a CUDA-only run selects just the CUDA job; full releases keep all platforms', () => {
+  assert.deepEqual(releaseMatrix(true).include, [{os: 'windows-2022', flavor: 'cuda'}]);
+  assert.equal(releaseMatrix().include.length, 4);
+});
+
+test('persistent runners clear old packages while retaining dependency/toolkit caches', t => {
+  const root = fixture(t);
+  const files = ['release-assets/old.zip', 'src-tauri/target/release/bundle/nsis/old.exe',
+    'src-tauri/target/release/deps/library.rlib', 'src-tauri/target/cuda-12.9.1/bin/nvcc.exe'];
+  for (const file of files) {
+    const path = join(root, file); mkdirSync(join(path, '..'), {recursive: true}); writeFileSync(path, 'cache');
+  }
+  cleanBuildOutputs(root);
+  for (const file of files.slice(0, 2)) assert.throws(() => readFileSync(join(root, file)), /ENOENT/);
+  for (const file of files.slice(2)) assert.equal(readFileSync(join(root, file), 'utf8'), 'cache');
+});
 
 test('validates matching package versions and tag before release builds', t => {
   const root = fixture(t); versions(root);

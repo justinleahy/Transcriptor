@@ -280,6 +280,42 @@ when signed. Signing credentials are required for automatic releases from tags.
 Local pipeline checks: `npm run test:packaging` and `node scripts/release.mjs metadata`.
 The publication tests use a simulated GitHub API; they never create actual releases.
 
+### Local Windows CUDA runner
+
+The CUDA release job can run on a local **Windows x64 PC or Windows x64 VM**.
+macOS/Linux runners cannot build this Windows package with the current toolchain.
+A GPU is optional for compilation and the packaged DLL startup check; CUDA inference
+testing still needs a supported NVIDIA GPU and driver.
+
+1. Prepare Windows with Git for Windows (including Bash), PowerShell 7, Node 22,
+   Rust, VS 2022 C++/CMake/Ninja tools, and LLVM. Set `LIBCLANG_PATH` for the runner
+   account if LLVM is outside `C:\Program Files\LLVM\bin`. Use a machine with ample
+   RAM and disk space for Rust, CUDA and repeated native builds (32 GB RAM recommended).
+2. In this private repository's **Settings → Actions → Runners → New self-hosted runner**,
+   choose **Windows / x64** and follow GitHub's download/checksum/registration commands
+   on that Windows machine. Add the custom label **`transcriptor-cuda`**. Run the runner
+   under the same Windows account that has the build tools configured. Registration
+   tokens belong in the runner setup command, never in this repository or chat.
+3. For a normal user account, start the runner with `run.cmd` and keep the session open.
+   Installing it as a Windows service is optional and requires administrator rights.
+4. Once GitHub shows the runner **Idle**, add this repository Actions **variable**:
+   `CUDA_RUNNER_LABELS` = `["self-hosted","Windows","X64","transcriptor-cuda"]`.
+   Only the CUDA matrix job moves locally; all other release jobs and ordinary CI stay
+   on GitHub-hosted runners. Without the variable, CUDA uses `windows-2022` on GitHub.
+5. Run **Actions → Release → Run workflow**, leave **signed** unchecked, and check
+   **Build only Windows CUDA packages**. This avoids rebuilding macOS/Linux/Windows CPU.
+
+On a self-hosted runner, checkout retains the compiled dependency and pinned CUDA
+toolkit caches. Each run clears old installers and staged downloads before packaging,
+so a previous package cannot accidentally be uploaded. Use the runner's dedicated work
+directory for builds. LLVM and compiler tools must be installed beforehand; the workflow
+does not attempt administrator-level installation on local runners.
+
+CUDA build logs now print elapsed time and compiler CPU/memory usage every minute.
+Increasing cumulative CPU time indicates activity even when the compiler emits no
+normal messages. Cargo timing reports and native build logs are uploaded separately as
+`cuda-build-diagnostics`, including on failure when those files are available.
+
 Configure these repository secrets before tagging a release:
 
 - macOS: `APPLE_CERTIFICATE` (base64 Developer ID Application `.p12`),

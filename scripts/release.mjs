@@ -1,10 +1,27 @@
 import { createHash } from 'node:crypto';
-import { createReadStream, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MARKER = '<!-- transcriptor-release-pipeline -->';
+
+export function releaseMatrix(cudaOnly = false) {
+  const include = [
+    {os: 'macos-latest', flavor: 'cpu'},
+    {os: 'windows-latest', flavor: 'cpu'},
+    {os: 'ubuntu-latest', flavor: 'cpu'},
+    {os: 'windows-2022', flavor: 'cuda'},
+  ];
+  return {include: cudaOnly ? include.filter(job => job.flavor === 'cuda') : include};
+}
+
+export function cleanBuildOutputs(root) {
+  // Preserve compiled dependencies and the pinned toolkit on a persistent runner.
+  for (const path of ['release-assets', 'src-tauri/target/release/bundle']) {
+    rmSync(join(root, path), {recursive: true, force: true});
+  }
+}
 
 export function releaseMetadata(root, ref = '') {
   const pkg = JSON.parse(readFileSync(join(root, 'package.json')));
@@ -127,9 +144,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const metadata = releaseMetadata(ROOT, process.env.GITHUB_REF);
     const [command, ...args] = process.argv.slice(2);
     if (command === 'metadata') {
-      const text = Object.entries(metadata).map(([key, value]) => `${key}=${value}`).join('\n') + '\n';
+      const values = {...metadata, matrix: JSON.stringify(releaseMatrix(args.includes('--cuda-only')))};
+      const text = Object.entries(values).map(([key, value]) => `${key}=${value}`).join('\n') + '\n';
       if (process.env.GITHUB_OUTPUT) writeFileSync(process.env.GITHUB_OUTPUT, text, {flag: 'a'});
       console.log(text.trim());
+    } else if (command === 'clean') {
+      cleanBuildOutputs(ROOT);
     } else if (command === 'stage') {
       const [platform, flavor] = args;
       const arch = (process.env.RUNNER_ARCH || process.arch).toLowerCase();
@@ -142,6 +162,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         token: process.env.GH_TOKEN, api: process.env.GITHUB_API_URL});
       console.log(url);
       if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, `Published [${metadata.tag}](${url})\n`, {flag: 'a'});
-    } else throw new Error('Usage: node scripts/release.mjs metadata | stage platform flavor | publish');
+    } else throw new Error('Usage: node scripts/release.mjs metadata [--cuda-only] | clean | stage platform flavor | publish');
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

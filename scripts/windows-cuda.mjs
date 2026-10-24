@@ -5,6 +5,7 @@ import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync,
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { runCommand } from './build-process.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CUDA_DLLS = ['cudart64_12.dll', 'cublas64_12.dll', 'cublaslt64_12.dll'];
@@ -146,14 +147,19 @@ export function stageRuntime({exe, cudaBin, msvcDirs, output, licenses}) {
   return {...result, config};
 }
 
-function run(args, env) {
+async function run(args, env) {
   const cli = join(ROOT, 'node_modules/@tauri-apps/cli/tauri.js');
-  const result = spawnSync(process.execPath, [cli, ...args], {cwd: ROOT, env, stdio: 'inherit'});
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`Tauri ${args[0]} failed (${result.status})`);
+  await runCommand(process.execPath, [cli, ...args], {cwd: ROOT, env, label: `CUDA ${args[0]}`,
+    onHeartbeat: () => {
+      const progress = spawnSync('pwsh', ['-NoProfile', '-File', join(ROOT, 'scripts/windows-build-progress.ps1')],
+        {encoding: 'utf8', timeout: 10000, windowsHide: true});
+      if (progress.status === 0) console.log(progress.stdout.trim());
+      else console.log('Compiler resource snapshot unavailable');
+    },
+  });
 }
 
-export function build(args) {
+export async function build(args) {
   if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Build Windows CUDA on a Windows x64 host');
   const toolkit = process.env.CUDA_PATH, redist = process.env.VCToolsRedistDir;
   if (!toolkit || !redist) throw new Error('CUDA_PATH and VCToolsRedistDir must be set; use build-windows-cuda.ps1');
@@ -167,7 +173,7 @@ export function build(args) {
   if (configIndex >= 0 && !args[configIndex + 1]) throw new Error('--config requires a path');
   const signing = configIndex >= 0 ? ['--config', resolve(args[configIndex + 1])] : [];
   const unsigned = args.includes('--unsigned') ? ['--no-sign'] : [];
-  run(['build', '--ci', '--no-bundle', '--features', 'gpu-cuda', ...signing, ...unsigned, '--', '--locked'], env);
+  await run(['build', '--ci', '--no-bundle', '--features', 'gpu-cuda', ...signing, ...unsigned, '--', '--locked', '--timings'], env);
   const output = join(ROOT, 'src-tauri/target/windows-cuda/portable');
   rmSync(output, {recursive: true, force: true});
   const licenseDir = process.env.CUDA_LICENSE_DIR || join(toolkit, 'licenses');
@@ -176,7 +182,7 @@ export function build(args) {
     cudaBin: join(toolkit, 'bin'), msvcDirs: [join(redist, 'x64/Microsoft.VC143.CRT')], output, licenses});
   const configPath = join(ROOT, 'src-tauri/target/windows-cuda/tauri.cuda.json');
   writeFileSync(configPath, JSON.stringify(staged.config, null, 2));
-  run(['bundle', '--ci', '--features', 'gpu-cuda', '--config', configPath, ...signing, ...unsigned], env);
+  await run(['bundle', '--ci', '--features', 'gpu-cuda', '--config', configPath, ...signing, ...unsigned], env);
   // Tauri signs the executable while bundling. Use that same binary in the ZIP.
   copyFileSync(join(ROOT, 'src-tauri/target/release/transcriptor.exe'), join(output, 'transcriptor.exe'));
   const smokeEnv = {...process.env};
@@ -189,7 +195,7 @@ export function build(args) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    if (process.argv[2] === 'build') build(process.argv.slice(3));
+    if (process.argv[2] === 'build') await build(process.argv.slice(3));
     else if (process.argv[2] === 'inspect') console.log(JSON.stringify(inspectPE(readFileSync(process.argv[3])), null, 2));
     else throw new Error('Usage: node scripts/windows-cuda.mjs build [--unsigned] [--config signing.json] | inspect file.exe');
   } catch (error) { console.error(error.message); process.exitCode = 1; }

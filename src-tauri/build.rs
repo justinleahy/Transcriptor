@@ -1,5 +1,10 @@
 fn main() {
-    tauri_build::build();
+    println!("cargo:rerun-if-changed=windows-app-manifest.xml");
+    let attributes = tauri_build::Attributes::new().windows_attributes(
+        tauri_build::WindowsAttributes::new()
+            .app_manifest(include_str!("windows-app-manifest.xml")),
+    );
+    tauri_build::try_build(attributes).expect("could not build Tauri application resources");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
         && std::env::var_os("CARGO_FEATURE_GPU_CUDA").is_some()

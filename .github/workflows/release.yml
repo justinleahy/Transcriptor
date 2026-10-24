@@ -9,6 +9,10 @@ on:
         description: Build signed distribution installers (requires signing secrets)
         type: boolean
         default: false
+      cuda_only:
+        description: Build only Windows CUDA packages
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -24,13 +28,14 @@ jobs:
     timeout-minutes: 5
     outputs:
       version: ${{ steps.metadata.outputs.version }}
+      matrix: ${{ steps.metadata.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - id: metadata
-        run: node scripts/release.mjs metadata
+        run: node scripts/release.mjs metadata ${{ inputs.cuda_only && '--cuda-only' || '' }}
       - name: Test release packaging and publication rules
         run: npm run test:packaging
 
@@ -39,28 +44,25 @@ jobs:
     needs: prepare
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            flavor: cpu
-          - os: windows-latest
-            flavor: cpu
-          - os: ubuntu-latest
-            flavor: cpu
-          # CUDA 12.9 uses the supported Visual Studio 2022 host compiler.
-          - os: windows-2022
-            flavor: cuda
-    runs-on: ${{ matrix.os }}
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    # Set CUDA_RUNNER_LABELS only after the local Windows runner is online.
+    # Other platforms keep using GitHub-hosted runners.
+    runs-on: ${{ matrix.flavor == 'cuda' && fromJSON(vars.CUDA_RUNNER_LABELS || '["windows-2022"]') || matrix.os }}
     timeout-minutes: 120
     env:
       RELEASE_SIGNING_REQUIRED: ${{ github.event_name == 'push' || inputs.signed }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: ${{ runner.environment != 'self-hosted' }}
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+
+      - name: Clear previous package outputs
+        run: node scripts/release.mjs clean
 
       - run: npm ci
 
@@ -72,9 +74,11 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment != 'self-hosted'
         with:
           workspaces: src-tauri -> target
           key: ${{ matrix.flavor }}
+          cache-on-failure: true
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -89,10 +93,16 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          if (-not (Test-Path "C:\Program Files\LLVM\bin\libclang.dll")) {
+          $libclangDirectory = $env:LIBCLANG_PATH
+          if (-not $libclangDirectory) { $libclangDirectory = 'C:\Program Files\LLVM\bin' }
+          if (-not (Test-Path (Join-Path $libclangDirectory 'libclang.dll'))) {
+            if ($env:RUNNER_ENVIRONMENT -eq 'self-hosted') {
+              throw 'Install LLVM or set LIBCLANG_PATH for the local runner account before running this workflow.'
+            }
             choco install llvm -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'LLVM installation failed.' }
           }
-          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LIBCLANG_PATH=$libclangDirectory" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build frontend
         run: npm run build
@@ -199,6 +209,17 @@ jobs:
           path: release-assets/
           if-no-files-found: error
           compression-level: 0
+
+      - name: Upload CUDA build diagnostics
+        if: always() && matrix.flavor == 'cuda'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cuda-build-diagnostics
+          path: |
+            src-tauri/target/cargo-timings/*.html
+            src-tauri/target/release/build/whisper-rs-sys-*/output
+            src-tauri/target/release/build/whisper-rs-sys-*/stderr
+          if-no-files-found: ignore
 
   publish:
     name: Publish GitHub Release

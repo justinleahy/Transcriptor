@@ -273,9 +273,13 @@ local macOS checks do not verify Windows or Linux capture or installation.
    appear under the repository's **Releases** after all builds and uploads succeed.
 
 To test first without signing credentials, open **Actions → Release → Run workflow**
-and leave **signed** unchecked. Download the four clearly labelled `unsigned-test`
-artifacts from the workflow run. Manual runs do not publish a GitHub Release, even
-when signed. Signing credentials are required for automatic releases from tags.
+and leave **signed** unchecked and **Build only Windows CUDA packages** unchecked.
+Keep **Publish complete unsigned builds as a GitHub prerelease** checked to publish
+all five downloads plus checksums under **Releases** after every platform succeeds.
+The release is labelled unsigned, marked as a prerelease, and uses a separate
+`preview-VERSION-RUN` tag. Uncheck that option for Actions artifacts only.
+CUDA-only builds and signed manual builds remain Actions artifacts only.
+Signing credentials are required for automatic releases from version tags.
 
 Local pipeline checks: `npm run test:packaging` and `node scripts/release.mjs metadata`.
 The publication tests use a simulated GitHub API; they never create actual releases.

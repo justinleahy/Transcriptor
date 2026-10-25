@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { cleanBuildOutputs, releaseMatrix, releaseMetadata, stageAssets, prepareReleaseAssets, publishRelease } from './release.mjs';
+import { cleanBuildOutputs, releaseMatrix, releaseMetadata, previewMetadata, stageAssets, prepareReleaseAssets, publishRelease } from './release.mjs';
 
 const version = '0.1.0';
 const metadata = {version, tag: `v${version}`, prerelease: false};
@@ -59,6 +59,18 @@ test('recognizes prerelease tags and rejects unsafe version strings', t => {
   assert.deepEqual(releaseMetadata(root, `refs/tags/v${beta}`), {version: beta, tag: `v${beta}`, prerelease: true});
   versions(root, '../invalid', '../invalid');
   assert.throws(() => releaseMetadata(root), /must be X.Y.Z/);
+});
+
+const previewRun = {eventName: 'workflow_dispatch', ref: 'refs/heads/main', runNumber: '4', signed: false, cudaOnly: false};
+test('manual full-platform previews have a separate non-production tag', () => {
+  assert.deepEqual(previewMetadata(metadata, previewRun), {
+    version, tag: 'preview-0.1.0-4', prerelease: true, unsigned: true,
+  });
+  for (const invalid of [{eventName: 'push'}, {ref: 'refs/tags/v0.1.0'}, {signed: true},
+    {cudaOnly: true}, {runNumber: '../bad'}, {runNumber: undefined}, {runNumber: '0'}]) {
+    assert.throws(() => previewMetadata(metadata, {...previewRun, ...invalid}), /requires|requires a|Preview requires/);
+  }
+  assert.throws(() => previewMetadata(metadata, {}), /requires/);
 });
 
 test('stages distinguishable CPU/CUDA installers and portable ZIP', t => {
@@ -139,6 +151,27 @@ test('publishes only after all six assets upload to a draft', async t => {
   assert.equal(calls.find(call => call.method === 'POST').body.draft, true);
   assert.equal(calls.filter(call => call.url.includes('uploads.example')).length, 6);
   assert.deepEqual(calls.at(-1).body, {draft: false});
+});
+
+test('unsigned previews publish all platforms with an explicit preview label', async t => {
+  const {calls, options} = github(t);
+  options.metadata = previewMetadata(metadata, previewRun);
+  await publishRelease(options);
+  const release = calls.find(call => call.method === 'POST').body;
+  assert.equal(release.tag_name, 'preview-0.1.0-4');
+  assert.equal(release.prerelease, true);
+  assert.match(release.name, /unsigned desktop preview/);
+  assert.match(release.body, /Unsigned preview for testing/);
+  assert.equal(calls.filter(call => call.url.includes('uploads.example')).length, 6);
+  assert.deepEqual(calls.at(-1).body, {draft: false, make_latest: 'false'});
+});
+
+test('a preview cannot publish a CUDA-only package set', async t => {
+  const {calls, options} = github(t);
+  options.metadata = previewMetadata(metadata, previewRun);
+  rmSync(join(options.directory, packageNames[0]));
+  await assert.rejects(publishRelease(options), /Missing release asset|five platform/);
+  assert.equal(calls.length, 0);
 });
 
 test('a rerun replaces only assets in a pipeline-owned draft', async t => {

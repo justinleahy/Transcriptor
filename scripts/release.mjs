@@ -41,6 +41,14 @@ export function releaseMetadata(root, ref = '') {
   return {version: pkg.version, tag, prerelease: pkg.version.includes('-')};
 }
 
+export function previewMetadata(metadata, {eventName, ref = '', runNumber, signed = true, cudaOnly = true}) {
+  if (eventName !== 'workflow_dispatch' || !ref.startsWith('refs/heads/') || signed || cudaOnly) {
+    throw new Error('An unsigned preview requires a manual full-platform branch build');
+  }
+  if (!/^[1-9]\d*$/.test(String(runNumber ?? ''))) throw new Error('Preview requires a valid workflow run number');
+  return {...metadata, tag: `preview-${metadata.version}-${runNumber}`, prerelease: true, unsigned: true};
+}
+
 export function stageAssets({bundle, output, version, platform, arch, flavor}) {
   if (!['x64', 'arm64'].includes(arch)) throw new Error(`Unsupported architecture: ${arch}`);
   const definitions = {
@@ -116,8 +124,10 @@ export async function publishRelease({directory, metadata, repository, commit, t
     for (const asset of assets) await json(`${route}/releases/assets/${asset.id}`, 'DELETE');
   } else {
     release = await json(`${route}/releases`, 'POST', {tag_name: metadata.tag, target_commitish: commit,
-      name: `Transcriptor ${metadata.version}`, draft: true, prerelease: metadata.prerelease,
+      name: `Transcriptor ${metadata.version}${metadata.unsigned ? ' — unsigned desktop preview' : ''}`,
+      draft: true, prerelease: metadata.prerelease,
       body: `${MARKER}\n\nPackaged desktop builds for macOS, Windows and Linux.\n\n` +
+        (metadata.unsigned ? '**Unsigned preview for testing.** Code signing and notarization have not been performed.\n\n' : '') +
         'Windows: choose the CPU installer, or the CUDA installer/portable ZIP for a supported NVIDIA GPU with an existing compatible driver.\n\n' +
         'Installers use per-user locations. The portable CUDA ZIP requires WebView2.\n\n' +
         'Verify downloads against SHA256SUMS.txt. See the README for requirements and installation instructions.'});
@@ -135,7 +145,9 @@ export async function publishRelease({directory, metadata, repository, commit, t
       throw new Error(`Upload verification failed for ${name}; release remains a draft`);
     }
   }
-  const published = await json(`${route}/releases/${release.id}`, 'PATCH', {draft: false});
+  const published = await json(`${route}/releases/${release.id}`, 'PATCH', {
+    draft: false, ...(metadata.unsigned ? {make_latest: 'false'} : {}),
+  });
   return published.html_url;
 }
 
@@ -155,13 +167,21 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       const arch = (process.env.RUNNER_ARCH || process.arch).toLowerCase();
       console.log(stageAssets({bundle: join(ROOT, 'src-tauri/target/release/bundle'), output: join(ROOT, 'release-assets'),
         version: metadata.version, platform, arch, flavor}).join('\n'));
-    } else if (command === 'publish') {
-      if (process.env.GITHUB_REF !== `refs/tags/${metadata.tag}`) throw new Error('Only a version tag can publish a release');
-      const url = await publishRelease({directory: join(ROOT, 'release-assets'), metadata,
+    } else if (command === 'publish' || command === 'publish-preview') {
+      let publication = metadata;
+      if (command === 'publish-preview') {
+        publication = previewMetadata(metadata, {eventName: process.env.GITHUB_EVENT_NAME,
+          ref: process.env.GITHUB_REF, runNumber: process.env.GITHUB_RUN_NUMBER,
+          signed: process.env.RELEASE_SIGNING_REQUIRED !== 'false',
+          cudaOnly: process.env.RELEASE_CUDA_ONLY !== 'false'});
+      } else if (process.env.GITHUB_REF !== `refs/tags/${metadata.tag}`) {
+        throw new Error('Only a version tag can publish a release');
+      }
+      const url = await publishRelease({directory: join(ROOT, 'release-assets'), metadata: publication,
         repository: process.env.GITHUB_REPOSITORY, commit: process.env.GITHUB_SHA,
         token: process.env.GH_TOKEN, api: process.env.GITHUB_API_URL});
       console.log(url);
-      if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, `Published [${metadata.tag}](${url})\n`, {flag: 'a'});
-    } else throw new Error('Usage: node scripts/release.mjs metadata [--cuda-only] | clean | stage platform flavor | publish');
+      if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, `Published [${publication.tag}](${url})\n`, {flag: 'a'});
+    } else throw new Error('Usage: node scripts/release.mjs metadata [--cuda-only] | clean | stage platform flavor | publish | publish-preview');
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
